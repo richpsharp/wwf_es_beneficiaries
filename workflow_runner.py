@@ -39,6 +39,7 @@ import pandas as pd
 import numpy as np
 import rasterio
 import rasterio.mask
+import rasterio.features
 import pyogrio
 from pyproj import CRS, Transformer, Geod
 
@@ -284,19 +285,18 @@ def process_config(config_path: Path) -> Dict[str, Any]:
 
     missing_messages = []
     if not population_raster_path:
-        missing_messages.append("population_raster_path (path to population raster)")
+        missing_messages.append(f"population_raster_path {population_raster_path}")
     elif not Path(population_raster_path).exists():
         missing_messages.append(
             f"population_raster_path does not exist: {population_raster_path}"
         )
 
     if not traveltime_raster_path:
-        missing_messages.append("traveltime_raster_path (path to travel-time raster)")
+        missing_messages.append(f"traveltime_raster_path {traveltime_raster_path}")
     elif not Path(traveltime_raster_path).exists():
         missing_messages.append(
             f"traveltime_raster_path does not exist: {traveltime_raster_path}"
         )
-        missing_messages.append("population_raster_path (path to population raster)")
 
     if not dem_raster_path:
         missing_messages.append("dem_raster_path (path to DEM raster)")
@@ -304,16 +304,14 @@ def process_config(config_path: Path) -> Dict[str, Any]:
         missing_messages.append(f"dem_raster_path does not exist: {dem_raster_path}")
 
     if not subwatershed_vector_path:
-        missing_messages.append(
-            "subwatershed_vector_path (path to subwatershed shapefile/vector)"
-        )
+        missing_messages.append(f"subwatershed_vector_path {subwatershed_vector_path}")
     elif not Path(subwatershed_vector_path).exists():
         missing_messages.append(
             f"subwatershed_vector_path does not exist: {subwatershed_vector_path}"
         )
 
     if not aoi_vector_pattern:
-        missing_messages.append("aoi_vector_pattern (one or more AOI file patterns)")
+        missing_messages.append("aoi_vector_pattern is empty")
 
     if wgs84_pixel_size is None:
         missing_messages.append(
@@ -347,7 +345,7 @@ def process_config(config_path: Path) -> Dict[str, Any]:
                 f"{type(section).__name__}"
             )
             continue
-
+        matched = False
         if "masks" in section:
             found_sections.append("masks")
             matched = True
@@ -382,9 +380,9 @@ def process_config(config_path: Path) -> Dict[str, Any]:
             errors.append(
                 f"sections[{idx}] must contain at least one of " f'["masks", "combine"]'
             )
-    if len(found_sections) != 2:
+    if set(found_sections) != set(["masks", "combine"]):
         raise ValueError(
-            "Expected both a `masks` and `combine` section but missing at " "least one."
+            "Expected both a `masks` and `combine` section but missing at least one."
         )
 
     if errors:
@@ -445,9 +443,10 @@ def setup_logger(level: str, log_file: str) -> logging.Logger:
     sh.setFormatter(logging.Formatter(fmt))
     root_logger.addHandler(sh)
 
-    fh = logging.FileHandler(log_file, mode="w", encoding="utf-8")
-    fh.setFormatter(logging.Formatter(fmt))
-    root_logger.addHandler(fh)
+    if log_file:
+        fh = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+        fh.setFormatter(logging.Formatter(fmt))
+        root_logger.addHandler(fh)
 
     return root_logger
 
@@ -776,8 +775,7 @@ def _clip_and_reproject_raster(
             raise ValueError("bbox_gdf must have a CRS defined")
 
         if "+proj=eck4" in bbox_gdf.crs.to_proj4().lower():
-            logger.info("eckert is so broken, just doing regular lat/lng bounds")
-            projected_box_gdf = transform_edge_points_eckert_to_wgs84(bbox_gdf)
+            # eckert is so broken, just doing regular lat/lng bounds
             projected_box_gdf = gpd.GeoDataFrame(
                 geometry=[box(-179, -80, 179, 80)], crs="EPSG:4326"
             )
@@ -874,7 +872,7 @@ def apply_travel_time_mask(
         working_dir / f"{traveltime_raster_path.stem}_travel_clip.tif"
     )
     target_friction_clipped_raster_path = Path(
-        working_dir / f"{traveltime_raster_path.stem}_travel_clip.tif"
+        working_dir / f"{traveltime_raster_path.stem}_friction_clip.tif"
     )
     target_aoi_raster_path = Path(working_dir / "travel_time_aoi_mask.tif")
 
@@ -887,7 +885,7 @@ def apply_travel_time_mask(
 
     with rasterio.open(target_pop_clipped_raster_path) as pop_ref:
         ref_meta = pop_ref.meta.copy()
-        pop_array = pop_ref.read(1).astype(np.int64)
+        pop_array = pop_ref.read(1)
 
     _clip_and_reproject_raster(
         traveltime_raster_path,
@@ -930,7 +928,7 @@ def apply_travel_time_mask(
 
     pop_meta = ref_meta.copy()
     pop_meta.update(
-        {"count": 1, "dtype": rasterio.int64, "nodata": 0, "compress": "lzw"}
+        {"count": 1, "dtype": rasterio.int32, "nodata": 0, "compress": "lzw"}
     )
     pop_masked_array = np.where(
         (travel_reach_array > 0) & (pop_array > 0), pop_array, 0
@@ -1136,7 +1134,11 @@ def calculate_ds_pop_from_conditional_raster(
     if max_downstream_distance_m is not None:
 
         def _distance_mask_op(mask, n_pixels):
-            return n_pixels * travel_time_pixel_size_m <= max_downstream_distance_m
+            return (
+                (n_pixels > 0)
+                & mask
+                & (travel_time_pixel_size_m <= max_downstream_distance_m)
+            )
 
         distance_transform_raster_path = str(
             working_dir / f"dt_{condition_id}_{base_raster_path.name}"
@@ -1199,7 +1201,7 @@ def combine_pops(
     def or_op(*value_list):
         result = value_list[0]
         for value_array in value_list[1:]:
-            result |= value_array
+            result = np.maximum(result, value_array)
         return result
 
     base_pop_raster_list = [str(path) for path in pop_raster_list]
@@ -1226,7 +1228,12 @@ def combine_pops(
         gdal.GDT_Float32,
         None,
     )
-    return np.sum(gdal.OpenEx(target_combined_pop_raster_path).ReadAsArray())
+    raster = gdal.OpenEx(target_combined_pop_raster_path)
+    array = raster.ReadAsArray()
+    raster = None
+    pop_sum = np.sum(array)
+    array = None
+    return pop_sum
 
 
 def main() -> None:
@@ -1235,9 +1242,6 @@ def main() -> None:
         description="Extract and normalize analysis config from YAML."
     )
     ap.add_argument("config", type=Path, help="Path to YAML config file")
-    ap.add_argument(
-        "--json", action="store_true", help="Print normalized JSON to stdout"
-    )
     ap.add_argument(
         "--validate-paths",
         action="store_true",
@@ -1338,11 +1342,13 @@ def main() -> None:
         for mask_section in config["masks"]:
             section_id = mask_section["id"]
             section_mask_ids.add(section_id)
-            target_pop_raster_path = (
-                output_dir / f"{aoi_key}_{mask_section['id']}_pop.tif"
-            )
+            target_pop_raster_path = output_dir / f"{aoi_key}_{section_id}_pop.tif"
             pop_rasters.append(target_pop_raster_path)
             if mask_section["type"] == "travel_time_population":
+                logger.debug(section_id)
+                travel_time_working_dir = working_dir / section_id
+                travel_time_working_dir.mkdir(parents=True, exist_ok=True)
+
                 travel_task = task_graph.add_task(
                     func=apply_travel_time_mask,
                     args=(
@@ -1352,7 +1358,7 @@ def main() -> None:
                         mask_section["params"]["max_hours"],
                         good_crs_for_aoi[aoi_key].get().crs,
                         target_pop_raster_path,
-                        working_dir,
+                        travel_time_working_dir,
                     ),
                     store_result=True,
                     target_path_list=[target_pop_raster_path],
@@ -1385,7 +1391,6 @@ def main() -> None:
                 pop_raster_tasks.append(conditional_task)
             else:
                 raise ValueError(f"unknown mask section type: {mask_section['type']}")
-        target_combined_pop_raster_path = output_dir / f"{aoi_key}_total_pop.tif"
         task_graph.join()
         target_combined_pop_raster_path = output_dir / f"{aoi_key}_total_pop.tif"
         combined_task = task_graph.add_task(
@@ -1410,7 +1415,7 @@ def main() -> None:
     for aoi_key, results in pop_results.items():
         row = {"aoi": aoi_key}
         for header in section_mask_ids:
-            row[header] = results.get(header, "n/a").get()
+            row[header] = results.get(header, "n/a")
         rows.append(row)
 
     df = pd.DataFrame(rows, columns=["aoi"] + list(section_mask_ids))
