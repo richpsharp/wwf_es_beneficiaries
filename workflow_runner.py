@@ -613,7 +613,9 @@ def subset_subwatersheds(
     aoi_union = aoi_gdf.geometry.union_all()
     aoi_bbox = box(*aoi_gdf.total_bounds)
 
+    logger.debug(f"about to read info for {subwatershed_vector_path}")
     subwatershed_info = pyogrio.read_info(subwatershed_vector_path)
+    logger.debug(f"successfully read info for {subwatershed_vector_path}")
     sub_crs = (
         CRS.from_user_input(subwatershed_info.get("crs"))
         if subwatershed_info.get("crs")
