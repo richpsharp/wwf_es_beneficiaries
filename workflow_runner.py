@@ -1193,7 +1193,7 @@ def calc_flow_dir(dem_path, working_dir, target_flow_dir_raster_path):
 
 
 def combine_pops(
-    pop_raster_list,
+    pop_id_raster_list,
     wgs84_pixel_size,
     working_dir,
     target_combined_pop_raster_path,
@@ -1204,15 +1204,20 @@ def combine_pops(
             result = np.maximum(result, value_array)
         return result
 
-    base_pop_raster_list = [str(path) for path in pop_raster_list]
+    raster_ids = [raster_id for raster_id, _ in pop_id_raster_list]
+    base_pop_raster_list = [str(path) for _, path in pop_id_raster_list]
+
     aligned_dir_path = working_dir / "aligned_pops"
     aligned_dir_path.mkdir(parents=True, exist_ok=True)
+
     aligned_pop_raster_list = [
         str(aligned_dir_path / os.path.basename(path)) for path in base_pop_raster_list
     ]
+
     srs = osr.SpatialReference()
     srs.ImportFromEPSG(4326)
     wgs84_wkt = srs.ExportToWkt()
+
     geoprocessing.align_and_resize_raster_stack(
         base_pop_raster_list,
         aligned_pop_raster_list,
@@ -1221,6 +1226,15 @@ def combine_pops(
         "union",
         target_projection_wkt=wgs84_wkt,
     )
+
+    aligned_pop_sums_by_id = {}
+    for raster_id, aligned_path in zip(raster_ids, aligned_pop_raster_list):
+        raster = gdal.OpenEx(aligned_path)
+        array = raster.ReadAsArray()
+        raster = None
+        aligned_pop_sums_by_id[raster_id] = np.sum(array)
+        array = None
+
     geoprocessing.raster_calculator(
         [(str(path), 1) for path in aligned_pop_raster_list],
         or_op,
@@ -1228,12 +1242,14 @@ def combine_pops(
         gdal.GDT_Float32,
         None,
     )
+
     raster = gdal.OpenEx(target_combined_pop_raster_path)
     array = raster.ReadAsArray()
     raster = None
-    pop_sum = np.sum(array)
+    aligned_pop_sums_by_id["combined pop"] = np.sum(array)
     array = None
-    return pop_sum
+
+    return aligned_pop_sums_by_id
 
 
 def main() -> None:
@@ -1337,13 +1353,13 @@ def main() -> None:
             task_name=f"calculate flow dir for {aoi_key}",
         )
 
-        pop_rasters = []
+        pop_id_raster_list = []
         pop_raster_tasks = []
         for mask_section in config["masks"]:
             section_id = mask_section["id"]
             section_mask_ids.add(section_id)
             target_pop_raster_path = output_dir / f"{aoi_key}_{section_id}_pop.tif"
-            pop_rasters.append(target_pop_raster_path)
+            pop_id_raster_list.append((section_id, target_pop_raster_path))
             if mask_section["type"] == "travel_time_population":
                 logger.debug(section_id)
                 travel_time_working_dir = working_dir / section_id
@@ -1364,7 +1380,6 @@ def main() -> None:
                     target_path_list=[target_pop_raster_path],
                     task_name=f"travel time for {aoi_key}",
                 )
-                pop_results[aoi_key][section_id] = travel_task
                 pop_raster_tasks.append(travel_task)
             elif mask_section["type"] == "conditional_raster":
                 conditional_task = task_graph.add_task(
@@ -1387,7 +1402,6 @@ def main() -> None:
                     target_path_list=[target_pop_raster_path],
                     task_name=f"conditional downstream {section_id}",
                 )
-                pop_results[aoi_key][section_id] = conditional_task
                 pop_raster_tasks.append(conditional_task)
             else:
                 raise ValueError(f"unknown mask section type: {mask_section['type']}")
@@ -1396,7 +1410,7 @@ def main() -> None:
         combined_task = task_graph.add_task(
             func=combine_pops,
             args=(
-                pop_rasters,
+                pop_id_raster_list,
                 wgs84_pixel_size,
                 working_dir,
                 target_combined_pop_raster_path,
@@ -1408,14 +1422,15 @@ def main() -> None:
         )
         combined_header = "combined pop"
         section_mask_ids.add(combined_header)
-        pop_results[aoi_key][combined_header] = combined_task
+        pop_results[aoi_key] = combined_task
 
     task_graph.join()
     rows = []
     for aoi_key, results in pop_results.items():
         row = {"aoi": aoi_key}
+        pop_count_results = results.get()
         for header in section_mask_ids:
-            row[header] = results[header].get()
+            row[header] = pop_count_results[header]
             logger.debug(row[header])
         rows.append(row)
 
