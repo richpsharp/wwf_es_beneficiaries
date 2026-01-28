@@ -1415,7 +1415,8 @@ def main() -> None:
     for aoi_key, results in pop_results.items():
         row = {"aoi": aoi_key}
         for header in section_mask_ids:
-            row[header] = results.get(header, "n/a")
+            row[header] = results.get(header).get()
+            logger.debug(row[header])
         rows.append(row)
 
     df = pd.DataFrame(rows, columns=["aoi"] + list(section_mask_ids))
