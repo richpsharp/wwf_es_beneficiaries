@@ -1136,7 +1136,7 @@ def calculate_ds_pop_from_conditional_raster(
         def _distance_mask_op(mask, n_pixels):
             return (
                 (n_pixels > 0)
-                & mask
+                & mask.astype(bool)
                 & (travel_time_pixel_size_m <= max_downstream_distance_m)
             )
 
@@ -1361,7 +1361,6 @@ def main() -> None:
             target_pop_raster_path = output_dir / f"{aoi_key}_{section_id}_pop.tif"
             pop_id_raster_list.append((section_id, target_pop_raster_path))
             if mask_section["type"] == "travel_time_population":
-                logger.debug(section_id)
                 travel_time_working_dir = working_dir / section_id
                 travel_time_working_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1429,9 +1428,8 @@ def main() -> None:
     for aoi_key, results in pop_results.items():
         row = {"aoi": aoi_key}
         pop_count_results = results.get()
-        for header in section_mask_ids:
+        for header in pop_count_results:
             row[header] = pop_count_results[header]
-            logger.debug(row[header])
         rows.append(row)
 
     df = pd.DataFrame(rows, columns=["aoi"] + list(section_mask_ids))
