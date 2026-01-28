@@ -1415,7 +1415,7 @@ def main() -> None:
     for aoi_key, results in pop_results.items():
         row = {"aoi": aoi_key}
         for header in section_mask_ids:
-            row[header] = results.get(header).get()
+            row[header] = results[header].get()
             logger.debug(row[header])
         rows.append(row)
 
